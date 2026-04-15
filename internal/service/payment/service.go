@@ -7,6 +7,7 @@ import (
 	"time"
 
 	balancev1 "github.com/martketplace-vkr/balance/pkg/api/grpc/v1"
+	adminPb "github.com/martketplace-vkr/balance/pkg/api/grpc/v1/admin"
 	domainPb "github.com/martketplace-vkr/balance/pkg/api/grpc/v1/domain"
 	orderPb "github.com/martketplace-vkr/balance/pkg/api/grpc/v1/order"
 	ordomain "github.com/martketplace-vkr/order/domain"
@@ -14,6 +15,7 @@ import (
 	paydomain "github.com/martketplace-vkr/payment/internal/domain"
 	"github.com/martketplace-vkr/payment/internal/repository/pg"
 	"github.com/martketplace-vkr/pkg/inbox/dto"
+	"github.com/martketplace-vkr/pkg/utils/currency"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -38,6 +40,18 @@ type Service struct {
 
 type balanceTopUpEvent struct {
 	UserID int64 `json:"user_id"`
+}
+
+type cryptoDepositConfirmedEvent struct {
+	UserID        int64  `json:"user_id"`
+	Address       string `json:"address"`
+	Network       string `json:"network"`
+	Asset         string `json:"asset"`
+	TxHash        string `json:"tx_hash"`
+	LogIndex      int64  `json:"log_index"`
+	Amount        string `json:"amount"`
+	BlockNumber   int64  `json:"block_number"`
+	Confirmations int64  `json:"confirmations"`
 }
 
 func New(repository *pg.Repository, balance *balancev1.Connector, outbox outbox, cfg processorconfig.Config) *Service {
@@ -153,6 +167,35 @@ func (s *Service) HandleBalanceTopUp(ctx context.Context, event dto.Event) error
 	}
 
 	return s.repository.WakePendingByUserID(ctx, payload.UserID, time.Now().UTC())
+}
+
+func (s *Service) HandleCryptoDepositConfirmed(ctx context.Context, event dto.Event) error {
+	var payload cryptoDepositConfirmedEvent
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return err
+	}
+
+	if payload.Network != "TRON" || payload.Asset != "USDT" {
+		return nil
+	}
+
+	_, err := s.balance.Admin.PostAdjustment(ctx, &adminPb.PostAdjustmentRequest{
+		OwnerType:      domainPb.WalletOwnerType_WALLET_OWNER_TYPE_USER,
+		OwnerId:        payload.UserID,
+		IdempotencyKey: fmt.Sprintf("crypto-deposit-%s-%d", payload.TxHash, payload.LogIndex),
+		Reason:         fmt.Sprintf("confirmed crypto deposit %s:%d", payload.TxHash, payload.LogIndex),
+		Money: &domainPb.Money{
+			Amount:       payload.Amount,
+			CurrencyCode: int64(currency.USDTinTRC),
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	return s.outbox.Send(ctx, "balance_topup_completed", balanceTopUpEvent{
+		UserID: payload.UserID,
+	})
 }
 
 func (s *Service) ProcessDuePayments(ctx context.Context) error {
