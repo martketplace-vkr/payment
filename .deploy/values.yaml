@@ -1,0 +1,23 @@
+serviceName: payment
+namespace: martketplace-vkr
+
+replicas: 1
+
+containerPort: 5000
+
+service:
+  type: ClusterIP
+  port: 5000
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi
+
+ingress:
+  enabled: false
+  host: example.com
+  port: 8000
