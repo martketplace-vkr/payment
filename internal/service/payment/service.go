@@ -76,12 +76,16 @@ func (s *Service) HandleOrderCreate(ctx context.Context, event dto.Event) error 
 	}
 
 	now := time.Now().UTC()
+	currencyCode := order.Payment.CurrencyID
+	if currencyCode <= 0 {
+		currencyCode = int64(currency.RUB)
+	}
 
 	return s.repository.Create(ctx, paydomain.Payment{
 		OrderID:           order.ID,
 		UserID:            order.UserID,
 		Amount:            order.TotalPrice,
-		CurrencyCode:      order.Payment.CurrencyID,
+		CurrencyCode:      currencyCode,
 		Status:            paydomain.StatusPendingFunds,
 		AttemptCount:      0,
 		PaymentDeadlineAt: now.Add(s.cfg.PaymentTimeout),
