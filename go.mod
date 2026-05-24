@@ -5,7 +5,7 @@ go 1.25.1
 require (
 	github.com/google/uuid v1.6.0
 	github.com/jmoiron/sqlx v1.4.0
-	github.com/martketplace-vkr/balance v1.0.0-rc001
+	github.com/martketplace-vkr/balance v1.0.0-rc002.0.20260524084429-e591d9569b9f
 	github.com/martketplace-vkr/order v1.0.0-rc003
 	github.com/martketplace-vkr/pkg v0.0.1
 	google.golang.org/grpc v1.80.0
@@ -69,6 +69,7 @@ require (
 	github.com/kr/text v0.2.0 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/lib/pq v1.11.2 // indirect
+	github.com/martketplace-vkr/analytics v0.0.0-20260524084400-2cad0df99af1 // indirect
 	github.com/martketplace-vkr/cart v1.0.0-rc002 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -124,3 +125,4 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
+

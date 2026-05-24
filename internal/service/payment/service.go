@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"time"
 
+	analyticsv1 "github.com/martketplace-vkr/analytics/pkg/api/grpc/v1"
+	analyticsAdminPb "github.com/martketplace-vkr/analytics/pkg/api/grpc/v1/admin"
 	balancev1 "github.com/martketplace-vkr/balance/pkg/api/grpc/v1"
 	adminPb "github.com/martketplace-vkr/balance/pkg/api/grpc/v1/admin"
 	domainPb "github.com/martketplace-vkr/balance/pkg/api/grpc/v1/domain"
@@ -34,6 +37,7 @@ type outbox interface {
 type Service struct {
 	repository *pg.Repository
 	balance    *balancev1.Connector
+	analytics  *analyticsv1.Connector
 	outbox     outbox
 	cfg        processorconfig.Config
 }
@@ -54,10 +58,11 @@ type cryptoDepositConfirmedEvent struct {
 	Confirmations int64  `json:"confirmations"`
 }
 
-func New(repository *pg.Repository, balance *balancev1.Connector, outbox outbox, cfg processorconfig.Config) *Service {
+func New(repository *pg.Repository, balance *balancev1.Connector, analytics *analyticsv1.Connector, outbox outbox, cfg processorconfig.Config) *Service {
 	return &Service{
 		repository: repository,
 		balance:    balance,
+		analytics:  analytics,
 		outbox:     outbox,
 		cfg:        cfg,
 	}
@@ -88,12 +93,12 @@ func (s *Service) HandleOrderCreate(ctx context.Context, event dto.Event) error 
 }
 
 func (s *Service) HandleOrderCancel(ctx context.Context, event dto.Event) error {
-	var payload paydomain.Event
-	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+	orderID, err := orderIDFromPayload(event.Payload)
+	if err != nil {
 		return err
 	}
 
-	payment, err := s.repository.GetByOrderID(ctx, payload.OrderID)
+	payment, err := s.repository.GetByOrderID(ctx, orderID)
 	if err != nil {
 		if pg.IsNotFound(err) {
 			return nil
@@ -105,19 +110,25 @@ func (s *Service) HandleOrderCancel(ctx context.Context, event dto.Event) error 
 	case paydomain.StatusReserved:
 		return s.releasePayment(ctx, *payment, "order_cancelled")
 	case paydomain.StatusPendingFunds, paydomain.StatusFailed:
-		return s.repository.MarkCancelled(ctx, payload.OrderID, "order_cancelled")
+		return s.repository.MarkCancelled(ctx, orderID, "order_cancelled")
 	default:
 		return nil
 	}
 }
 
 func (s *Service) HandleOrderPickedUp(ctx context.Context, event dto.Event) error {
-	var payload paydomain.Event
-	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+	var order ordomain.Order
+	if err := json.Unmarshal(event.Payload, &order); err != nil {
 		return err
 	}
+	if order.ID <= 0 {
+		return fmt.Errorf("order_id must be greater than zero")
+	}
+	if order.VendorID <= 0 {
+		return fmt.Errorf("vendor_id must be greater than zero")
+	}
 
-	payment, err := s.repository.GetByOrderID(ctx, payload.OrderID)
+	payment, err := s.repository.GetByOrderID(ctx, order.ID)
 	if err != nil {
 		if pg.IsNotFound(err) {
 			return nil
@@ -128,13 +139,27 @@ func (s *Service) HandleOrderPickedUp(ctx context.Context, event dto.Event) erro
 		return nil
 	}
 
+	vendorAmount, marketplaceFee, err := s.calculateSettlement(ctx, payment.Amount, payment.CurrencyCode, order.VendorID)
+	if err != nil {
+		return err
+	}
+
 	resp, err := s.balance.Order.CaptureFunds(ctx, &orderPb.CaptureFundsRequest{
 		UserId:         payment.UserID,
 		OrderId:        payment.OrderID,
+		VendorId:       order.VendorID,
 		IdempotencyKey: fmt.Sprintf("payment-capture-%d", payment.OrderID),
 		Reason:         "order_picked_up",
 		Money: &domainPb.Money{
 			Amount:       payment.Amount,
+			CurrencyCode: payment.CurrencyCode,
+		},
+		VendorMoney: &domainPb.Money{
+			Amount:       vendorAmount,
+			CurrencyCode: payment.CurrencyCode,
+		},
+		MarketplaceFee: &domainPb.Money{
+			Amount:       marketplaceFee,
 			CurrencyCode: payment.CurrencyCode,
 		},
 	})
@@ -158,6 +183,26 @@ func (s *Service) HandleOrderPickedUp(ctx context.Context, event dto.Event) erro
 		Amount:       payment.Amount,
 		CurrencyCode: payment.CurrencyCode,
 	})
+}
+
+func orderIDFromPayload(payload []byte) (int64, error) {
+	var order ordomain.Order
+	if err := json.Unmarshal(payload, &order); err != nil {
+		return 0, err
+	}
+	if order.ID > 0 {
+		return order.ID, nil
+	}
+
+	var event paydomain.Event
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return 0, err
+	}
+	if event.OrderID <= 0 {
+		return 0, fmt.Errorf("order_id must be greater than zero")
+	}
+
+	return event.OrderID, nil
 }
 
 func (s *Service) HandleBalanceTopUp(ctx context.Context, event dto.Event) error {
@@ -334,6 +379,77 @@ func (s *Service) releasePayment(ctx context.Context, payment paydomain.Payment,
 		CurrencyCode: payment.CurrencyCode,
 		Reason:       reason,
 	})
+}
+
+func (s *Service) calculateSettlement(ctx context.Context, amount string, currencyCode int64, vendorID int64) (string, string, error) {
+	if s.analytics == nil || s.analytics.Admin == nil {
+		return "", "", fmt.Errorf("analytics client is not configured")
+	}
+
+	gross, err := parseRat(amount)
+	if err != nil {
+		return "", "", err
+	}
+	if gross.Sign() <= 0 {
+		return "", "", fmt.Errorf("amount must be greater than zero")
+	}
+
+	tariffResp, err := s.analytics.Admin.GetVendorTariff(ctx, &analyticsAdminPb.GetVendorTariffRequest{VendorId: vendorID})
+	if err != nil {
+		return "", "", err
+	}
+	if tariffResp.GetTariff() == nil {
+		return "", "", fmt.Errorf("vendor tariff is empty")
+	}
+
+	percent, err := parseRat(tariffResp.GetTariff().GetCommissionPercent())
+	if err != nil {
+		return "", "", err
+	}
+	if percent.Sign() < 0 || percent.Cmp(big.NewRat(100, 1)) > 0 {
+		return "", "", fmt.Errorf("commission_percent must be between 0 and 100")
+	}
+
+	fee := new(big.Rat).Mul(gross, percent)
+	fee.Quo(fee, big.NewRat(100, 1))
+	fee = roundCurrency(fee, currencyCode)
+	vendorAmount := new(big.Rat).Sub(gross, fee)
+
+	decimals := currencyDecimals(currencyCode)
+	return vendorAmount.FloatString(decimals), fee.FloatString(decimals), nil
+}
+
+func parseRat(raw string) (*big.Rat, error) {
+	value, ok := new(big.Rat).SetString(raw)
+	if !ok {
+		return nil, fmt.Errorf("invalid decimal value: %s", raw)
+	}
+
+	return value, nil
+}
+
+func roundCurrency(value *big.Rat, currencyCode int64) *big.Rat {
+	if value.Sign() == 0 {
+		return new(big.Rat)
+	}
+
+	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(currencyDecimals(currencyCode))), nil)
+	scaled := new(big.Rat).Mul(value, new(big.Rat).SetInt(scale))
+	scaled.Add(scaled, big.NewRat(1, 2))
+
+	rounded := new(big.Int).Quo(scaled.Num(), scaled.Denom())
+	return new(big.Rat).SetFrac(rounded, scale)
+}
+
+func currencyDecimals(currencyCode int64) int {
+	switch currencyCode {
+	case int64(currency.RUB):
+		return 2
+	case int64(currency.USDTinTRC):
+		return 8
+	default:
+		return 8
+	}
 }
 
 func isInsufficientFunds(err error) bool {

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 
+	analytics "github.com/martketplace-vkr/analytics/pkg/api/grpc/v1"
 	balance "github.com/martketplace-vkr/balance/pkg/api/grpc/v1"
 	"github.com/martketplace-vkr/payment/config"
 	inboxComponent "github.com/martketplace-vkr/payment/internal/app/cmp/inbox"
@@ -33,9 +34,10 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	}
 
 	outboxCmp := outboxComponent.New(cfg.Outbox, outboxCl)
+	analyticsClient := analytics.New(cfg.Analytics)
 	balanceClient := balance.New(cfg.Balance)
 	repo := repository.New(pg.DB)
-	service := paymentservice.New(repo, balanceClient, outboxCmp, cfg.Processor)
+	service := paymentservice.New(repo, balanceClient, analyticsClient, outboxCmp, cfg.Processor)
 	processorCmp := processorComponent.New(cfg.Processor, service)
 
 	inboxCmp := inboxComponent.New(
@@ -48,6 +50,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	cmps := build.Components{
 		pg,
 		outboxCmp,
+		analyticsClient,
 		balanceClient,
 		inboxCmp,
 		processorCmp,

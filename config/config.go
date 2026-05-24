@@ -1,6 +1,7 @@
 package config
 
 import (
+	analytics "github.com/martketplace-vkr/analytics/pkg/api/grpc/v1"
 	balance "github.com/martketplace-vkr/balance/pkg/api/grpc/v1"
 	"github.com/martketplace-vkr/payment/internal/app/cmp/inbox"
 	"github.com/martketplace-vkr/payment/internal/app/cmp/outbox"
@@ -13,6 +14,7 @@ type Config struct {
 	Postgres  pgxsqlxcomponent.Config     `validate:"required"`
 	Inbox     inbox.Config                `validate:"required"`
 	Outbox    outbox.Config               `validate:"required"`
+	Analytics analytics.Config            `validate:"required"`
 	Balance   balance.Config              `validate:"required"`
 	Processor processor.Config            `validate:"required"`
 	Kafka     kafkaconnector.ClientConfig `validate:"required"`
